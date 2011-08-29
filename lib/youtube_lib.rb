@@ -45,6 +45,19 @@ module YoutubeLib
     def self.included klass
 #NOTE: should :hash be avaliable externally?
       klass.send :attr_reader, :hash, :session
+      klass.send :extend, ClassMethods
+    end
+
+    module ClassMethods
+      def property name, args={}
+        define_method args[:method_name] || name do
+          val = hash[name]
+          val = val.is_a?(Array) ? val[0] : val
+          val = val.is_a?(Hash) ? val['content'] : val
+          val = val.send(args[:post_meth]) if args.include? :post_meth
+          val
+        end
+      end
     end
   end
   module Collection
@@ -126,32 +139,20 @@ module YoutubeLib
       @session = params[:session] if params.include? :session
     end
 
-    def id
-      hash['playlistId'][0]
-    end
-    def published
-      hash['published'][0]
-    end
-    def updated
-      hash['updated'][0]
-    end
+    property 'playlistId', :method_name => :id
+    property 'published'
+    property 'updated'
     def categories
 #TODO: make this a Category
       hash['category'].map{|d| d['term'] }
     end
-    def title
-      hash['title'][0]['content']
-    end
-    def content
-      hash['content']['content']
-    end
+    property 'title'
+    property 'content'
     def author
 #TODO: make this an Author
       hash['author'][0]['name'][0]
     end
-    def description
-      hash['description'][0]
-    end
+    property 'description'
 
     def videos
       @videos ||= begin
@@ -187,33 +188,21 @@ module YoutubeLib
       @session = params[:session] if params.include? :session
     end
 
-    def id
-      hash['id'][0]
-    end
-    def published
-      hash['published'][0]
-    end
-    def updated
-      hash['updated'][0]
-    end
+    property 'id'
+    property 'published'
+    property 'updated'
     def categories
 #TODO: make this a Category
       hash['category'].map{|d| d['term'] }
     end
-    def title
-      hash['title'][0]['content']
-    end
-    def content
-      hash['content']['content']
-    end
+    property 'title'
+    property 'content'
     def author
 #TODO: make this an Author
       hash['author'][0]['name'][0]
     end
-    def position
 #NOTE: when part of a playlist
-      hash['position'][0].to_i
-    end
+    property 'position', :post_meth => :to_i
 
     def url
       hash['link'].detect{|l| l['rel'] == 'alternate' && l['type'] == 'text/html' }['href']
