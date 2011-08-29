@@ -35,6 +35,10 @@ module YoutubeLib
         response.body[/Auth=(.*)/, 1]
       end
     end
+
+    def inspect
+      "#<#{self.class.name}:0x%08x @login=#{login.inspect} @source=#{source.inspect}>" % (object_id * 2)
+    end
   end
 
   module ApiData
@@ -44,6 +48,10 @@ module YoutubeLib
     end
   end
   module Collection
+    def self.included klass
+      klass.send :include, Enumerable
+    end
+
     def count
       hash['totalResults'][0].to_i
     end
@@ -69,8 +77,7 @@ module YoutubeLib
 
     def uploads
       xml = YoutubeLib.get "https://gdata.youtube.com/feeds/api/users/#{name}/uploads", session
-      #Videos.new :hash => XmlSimple.xml_in(File.read('videos')),
-      #           :session => session
+      #xml = File.read('videos')
       Videos.new :hash => XmlSimple.xml_in(xml),
                  :session => session
     end
@@ -82,7 +89,17 @@ module YoutubeLib
                       :session => session
       end
     end
+
+    def new_subscription_videos
+      @new_subscription_videos ||= begin
+        xml = YoutubeLib.get "https://gdata.youtube.com/feeds/api/users/#{name}/newsubscriptionvideos", session
+        #xml = File.read('newsubscriptionvideos')
+        Videos.new :hash => XmlSimple.xml_in(xml),
+                   :session => session
+      end
+    end
   end
+  User = Author
 
   class Playlists
     include ApiData
@@ -93,8 +110,11 @@ module YoutubeLib
       @session = params[:session] if params.include? :session
     end
 
-    def playlists
-      @playlists ||= hash['entry'].map{|data| Playlist.new :hash => data, :session => session }
+    def each &block
+#TODO: make this iterate over all entries and continue with "next" feed
+      hash['entry'].map do |hash|
+        yield Playlist.new :hash => hash, :session => session
+      end
     end
   end
 
@@ -151,9 +171,11 @@ module YoutubeLib
       @session = params[:session] if params.include? :session
     end
 
-    def videos
+    def each &block
 #TODO: make this iterate over all entries and continue with "next" feed
-      @videos ||= hash['entry'].map{|data| Video.new :hash => data, :session => session }
+      hash['entry'].map do |hash|
+        yield Video.new :hash => hash, :session => session
+      end
     end
   end
 
@@ -191,6 +213,10 @@ module YoutubeLib
     def position
 #NOTE: when part of a playlist
       hash['position'][0].to_i
+    end
+
+    def url
+      hash['link'].detect{|l| l['rel'] == 'alternate' && l['type'] == 'text/html' }['href']
     end
   end
 
