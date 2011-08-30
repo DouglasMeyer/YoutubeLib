@@ -2,17 +2,39 @@ require 'net/http'
 require 'xmlsimple'
 require 'ruby-debug'
 module YoutubeLib
-  def self.get url, session
+private
+  def self.request method, url, data, session=nil
     uri = URI.parse(url)
-    https = Net::HTTP.new(uri.host, uri.port)
-    https.use_ssl = true
-    response = https.get(uri.path, {
-      'Content-Type' => 'application/x-www-form-urlencoded',
-      'Authorization' => "GoogleLogin auth=#{session.auth}",
-      'X-GData-Key' => "key=#{session.developer_key}"
-    })
-    raise response.message unless response.code == '200'
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    headers = {
+      'Content-Type' => 'application/x-www-form-urlencoded'
+    }
+    data = data.map{|k,v| "#{k}=#{URI.escape(v)}"}.join('&') if data.is_a? Hash
+    if session
+      headers['Authorization'] = "GoogleLogin auth=#{session.auth}"
+      headers['X-GData-Key'] = "key=#{session.developer_key}"
+    end
+    response = case method
+    when :post
+      http.post(uri.path, data, headers)
+    when :delete
+      http.delete(uri.path, headers)
+    else
+      http.get(uri.path, headers)
+    end
+    raise [response.code, response.message].join(': ') unless response.code == '200'
     response.body
+  end
+public
+  def self.get url, session
+    request :get, url, nil, session
+  end
+  def self.post url, data, session=nil
+    request :post, url, data, session
+  end
+  def self.delete url, session=nil
+    request :delete, url, nil, session
   end
 
   class Session
@@ -23,16 +45,10 @@ module YoutubeLib
 
     def auth
       @auth ||= begin
-        uri = URI.parse("https://www.google.com/accounts/ClientLogin")
-        https = Net::HTTP.new(uri.host, uri.port)
-        https.use_ssl = true
-        data = "Email=#{URI.escape(login)}&Passwd=#{URI.escape(password)}&service=youtube&source=#{source}"
-        headers = {
-          'Content-Type' => 'application/x-www-form-urlencoded'
-        }
-        response = https.post(uri.path, data, headers)
-        raise response.message unless response.code == '200'
-        response.body[/Auth=(.*)/, 1]
+        YoutubeLib.post("https://www.google.com/accounts/ClientLogin", {
+          'Email' => login, 'Passwd' => password,
+          'service' => 'youtube', 'source' => source
+        })[/Auth=(.*)/, 1]
       end
     end
 
@@ -44,18 +60,37 @@ module YoutubeLib
   module ApiData
     def self.included klass
 #NOTE: should :hash be avaliable externally?
-      klass.send :attr_reader, :hash, :session
+      klass.send :attr_reader, :session
       klass.send :extend, ClassMethods
+    end
+
+    def hash
+      @hash || {}
+    end
+
+    def properties= args
+      args.each do |key, value|
+        send "#{key}=", value
+      end
     end
 
     module ClassMethods
       def property name, args={}
         define_method args[:method_name] || name do
+          val = instance_variable_get("@#{args[:method_name]}") || instance_variable_get("@#{name}")
+          return val unless val.nil?
           val = hash[name]
           val = val.is_a?(Array) ? val[0] : val
           val = val.is_a?(Hash) ? val['content'] : val
           val = val.send(args[:post_meth]) if args.include? :post_meth
           val
+        end
+
+        define_method "#{args[:method_name]}=" do |val|
+          instance_variable_set "@#{args[:method_name]}", val
+        end
+        define_method "#{name}=" do |val|
+          instance_variable_set "@#{args[:method_name]}", val
         end
       end
     end
@@ -63,29 +98,32 @@ module YoutubeLib
   module Collection
     def self.included klass
       klass.send :include, Enumerable
+      klass.send :include, InstanceMethods
+      klass.send :alias_method, :length, :count
     end
 
-    def count
-      hash['totalResults'][0].to_i
-    end
-    alias_method :length, :count
-    def title
-      hash['title'][0]
-    end
-    def author
+    module InstanceMethods
+      def count
+        hash['totalResults'][0].to_i
+      end
+      def title
+        hash['title'][0]
+      end
+      def author
 #TODO: make this an Author
-      hash['author'][0]['name']
+        hash['author'][0]['name']
+      end
     end
   end
 
   class Author
     include ApiData
 
-    attr_reader :name
+    property 'name'
     def initialize params={}
-      @name = params[:name] if params.include? :name
-      @session = params[:session] if params.include? :session
-      @hash = params[:hash] if params.include? :hash
+      @hash = params.delete(:hash) if params.include? :hash
+      @session = params.delete(:session) if params.include? :session
+      self.properties = params
     end
 
     def uploads
@@ -119,13 +157,14 @@ module YoutubeLib
     include Collection
 
     def initialize params={}
-      @hash = params[:hash] if params.include? :hash
-      @session = params[:session] if params.include? :session
+      @hash = params.delete(:hash) if params.include? :hash
+      @session = params.delete(:session) if params.include? :session
+      self.properties = params
     end
 
     def each &block
 #TODO: make this iterate over all entries and continue with "next" feed
-      hash['entry'].map do |hash|
+      (hash['entry'] || []).map do |hash|
         yield Playlist.new :hash => hash, :session => session
       end
     end
@@ -135,8 +174,9 @@ module YoutubeLib
     include ApiData
 
     def initialize params={}
-      @hash = params[:hash] if params.include? :hash
-      @session = params[:session] if params.include? :session
+      @hash = params.delete(:hash) if params.include? :hash
+      @session = params.delete(:session) if params.include? :session
+      self.properties = params
     end
 
     property 'playlistId', :method_name => :id
@@ -168,8 +208,9 @@ module YoutubeLib
     include ApiData
 
     def initialize params={}
-      @hash = params[:hash] if params.include? :hash
-      @session = params[:session] if params.include? :session
+      @hash = params.delete(:hash) if params.include? :hash
+      @session = params.delete(:session) if params.include? :session
+      self.properties = params
     end
 
     def each &block
@@ -184,11 +225,14 @@ module YoutubeLib
     include ApiData
 
     def initialize params={}
-      @hash = params[:hash] if params.include? :hash
-      @session = params[:session] if params.include? :session
+      @hash = params.delete(:hash) if params.include? :hash
+      @session = params.delete(:session) if params.include? :session
+      self.properties = params
     end
 
-    property 'id'
+    def id
+      hash['id'][0][/[a-z0-9_-]{11}/i]
+    end
     property 'published'
     property 'updated'
     def categories
@@ -204,8 +248,12 @@ module YoutubeLib
 #NOTE: when part of a playlist
     property 'position', :post_meth => :to_i
 
-    def url
-      hash['link'].detect{|l| l['rel'] == 'alternate' && l['type'] == 'text/html' }['href']
+    def web_url
+      #hash['link'].detect{|l| l['rel'] == 'alternate' && l['type'] == 'text/html' }['href']
+      link('alternate')['href']
+    end
+    def link(rel='self')
+      hash['link'].detect{|l| l['rel'] == rel }
     end
   end
 
