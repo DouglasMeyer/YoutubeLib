@@ -11,6 +11,7 @@ private
       'Content-Type' => 'application/x-www-form-urlencoded'
     }
     data = data.map{|k,v| "#{k}=#{URI.escape(v)}"}.join('&') if data.is_a? Hash
+    data ||= uri.query
     if session
       headers['Authorization'] = "GoogleLogin auth=#{session.auth}"
       headers['X-GData-Key'] = "key=#{session.developer_key}"
@@ -21,7 +22,7 @@ private
     when :delete
       http.delete(uri.path, headers)
     else
-      http.get(uri.path, headers)
+      http.get(data ? "#{uri.path}?#{data}" : uri.path, headers)
     end
     raise [response.code, response.message].join(': ') unless response.code == '200'
     response.body
@@ -59,11 +60,11 @@ public
 
   module ApiData
     def self.included klass
-#NOTE: should :hash be avaliable externally?
       klass.send :attr_reader, :session
       klass.send :extend, ClassMethods
     end
 
+#NOTE: should :hash be avaliable externally?
     def hash
       @hash || {}
     end
@@ -72,6 +73,10 @@ public
       args.each do |key, value|
         send "#{key}=", value
       end
+    end
+
+    def link(rel='self')
+      hash['link'].detect{|l| l['rel'] == rel }
     end
 
     module ClassMethods
@@ -93,13 +98,31 @@ public
           instance_variable_set "@#{args[:method_name]}", val
         end
       end
+      def list name, list_url, klass
+        define_method name do |refresh=false|
+          ivar_name = "@#{name}".to_sym
+          return instance_variable_get(ivar_name) if instance_variables.include?(ivar_name) && !refresh
+          url = list_url.gsub(/:(\w+)/){ send($1) }
+          value = if url.empty?
+            nil
+          else
+            xml = YoutubeLib.get url, session
+            #xml = File.read('videos')
+            klass = YoutubeLib.const_get(klass) if klass.is_a? String
+            klass.new(:hash => XmlSimple.xml_in(xml), :session => session)
+          end
+          instance_variable_set(ivar_name, value)
+        end
+      end
     end
   end
   module Collection
     def self.included klass
       klass.send :include, Enumerable
       klass.send :include, InstanceMethods
+      klass.send :extend, ClassMethods
       klass.send :alias_method, :length, :count
+      klass.send :list, :next_collection, ":next_collection_url", klass
     end
 
     module InstanceMethods
@@ -112,6 +135,35 @@ public
       def author
 #TODO: make this an Author
         hash['author'][0]['name']
+      end
+      def each &block
+        items = []
+        (hash['entry'] || []).each do |entry_hash|
+          iterates = self.class.iterates
+          iterates = self.class.iterates(YoutubeLib.const_get(iterates)) if iterates.is_a? String
+          item = iterates.new(:hash => entry_hash, :session => session)
+          items.push(item)
+          yield item
+        end
+        if next_collection
+          next_collection.each do |item|
+            items.push(item)
+            yield item
+          end
+        end
+        items
+      end
+    private
+      def next_collection_url
+        if link('next')
+          link('next')['href'].gsub(/^http:/, 'https:')
+        end
+      end
+    end
+    module ClassMethods
+      def iterates klass=nil
+        @iterates = klass unless klass.nil?
+        @iterates
       end
     end
   end
@@ -126,47 +178,21 @@ public
       self.properties = params
     end
 
-    def uploads
-      xml = YoutubeLib.get "https://gdata.youtube.com/feeds/api/users/#{name}/uploads", session
-      #xml = File.read('videos')
-      Videos.new :hash => XmlSimple.xml_in(xml),
-                 :session => session
-    end
-
-    def playlists
-      @playlists ||= begin
-        xml = YoutubeLib.get "https://gdata.youtube.com/feeds/api/users/#{name}/playlists?v=2", session
-        Playlists.new :hash => XmlSimple.xml_in(xml),
-                      :session => session
-      end
-    end
-
-    def new_subscription_videos
-      @new_subscription_videos ||= begin
-        xml = YoutubeLib.get "https://gdata.youtube.com/feeds/api/users/#{name}/newsubscriptionvideos", session
-        #xml = File.read('newsubscriptionvideos')
-        Videos.new :hash => XmlSimple.xml_in(xml),
-                   :session => session
-      end
-    end
+    list :uploads, "https://gdata.youtube.com/feeds/api/users/:name/uploads", 'Videos'
+    list :playlists, "https://gdata.youtube.com/feeds/api/users/:name/playlists?v=2", 'Playlists'
+    list :new_subscription_videos, "https://gdata.youtube.com/feeds/api/users/:name/newsubscriptionvideos", 'Videos'
   end
   User = Author
 
   class Playlists
     include ApiData
     include Collection
+    iterates 'Playlist'
 
     def initialize params={}
       @hash = params.delete(:hash) if params.include? :hash
       @session = params.delete(:session) if params.include? :session
       self.properties = params
-    end
-
-    def each &block
-#TODO: make this iterate over all entries and continue with "next" feed
-      (hash['entry'] || []).map do |hash|
-        yield Playlist.new :hash => hash, :session => session
-      end
     end
   end
 
@@ -194,30 +220,22 @@ public
     end
     property 'description'
 
-    def videos
-      @videos ||= begin
-        xml = YoutubeLib.get hash['feedLink'][0]['href'].gsub(/http:/, 'https:')+'?v=2', session
-        Videos.new :hash => XmlSimple.xml_in(xml),
-                   :session => session
-      end
+    list :videos, ":videos_url", 'Videos'
+  private
+    def videos_url
+      hash['feedLink'][0]['href'].gsub(/http:/, 'https:')+'?v=2'
     end
   end
 
   class Videos
-    include Collection
     include ApiData
+    include Collection
+    iterates 'Video'
 
     def initialize params={}
       @hash = params.delete(:hash) if params.include? :hash
       @session = params.delete(:session) if params.include? :session
       self.properties = params
-    end
-
-    def each &block
-#TODO: make this iterate over all entries and continue with "next" feed
-      hash['entry'].map do |hash|
-        yield Video.new :hash => hash, :session => session
-      end
     end
   end
 
@@ -245,15 +263,10 @@ public
 #TODO: make this an Author
       hash['author'][0]['name'][0]
     end
-#NOTE: when part of a playlist
     property 'position', :post_meth => :to_i
 
     def web_url
-      #hash['link'].detect{|l| l['rel'] == 'alternate' && l['type'] == 'text/html' }['href']
       link('alternate')['href']
-    end
-    def link(rel='self')
-      hash['link'].detect{|l| l['rel'] == rel }
     end
   end
 
